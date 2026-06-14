@@ -1,0 +1,547 @@
+Metodichka: Demo-ekzamen Alt Linux p10 ot Olezhi
+Set'
+
+================================================================
+
+1. ISP
+
+1.1 Pereimenovanie mashiny i izmenenie chasovykh poyasov
+hostnamectl set-hostname ISP.au-team.irpo; exec bash
+
+1.2 Prosmotr portov chtoby ponyat' kak nazyvayutsya porty (enp7s1 ili ens19)
+ip -c a   ili   ip -c -br a
+
+1.3 Nastroyka interfeysa enp7s1 (vykhod v internet)
+Perekhodim v direktoriyu:
+cd /etc/net/ifaces/enp7s1
+- Fayl ipv4address:
+(IP ot prepodavatelya)/24
+Primer: 10.0.1.77/24
+- Fayl ipv4route: default via 10.0.1.1
+- Fayl resolv.conf: nameserver 8.8.8.8
+- Fayl options:
+ONBOOT=yes
+TYPE=eth
+DISABLED=no
+CONFIG_IPV4=yes
+BOOTPROTO=static
+SYSTEMD_BOOTPROTO=static
+SYSTEMD_CONTROLLED=no
+CONFIG_WIRELESS=no
+
+1.4 Perezapusk seti i proverka
+systemctl restart network
+ping ya.ru
+
+1.5 Obnovlenie i ustanovka iptables
+apt-get update
+apt-get install iptables -y
+
+1.6 Vklyuchenie IP-forwarding
+Otredaktiruyte fayl /etc/net/sysctl.conf (menyaem 0 na 1):
+net.ipv4.ip_forward = 1
+Primenyaem:
+sysctl -p
+
+1.7 Nastroyka ostal'nykh portov (enp7s2 i enp7s3)
+Kopiruem nastroyki:
+cp -rf enp7s1/ enp7s2
+cp -rf enp7s1/ enp7s3
+
+Dlya enp7s2 (HQ-RTR):
+- ipv4address: 172.16.1.1/28
+- ipv4route: 172.16.1.1/28 via 172.16.1z.2/28
+
+Dlya enp7s3 (BR-RTR):
+- ipv4address: 172.16.2.1/28
+- ipv4route: 172.16.2.1/28 via 172.16.2.2/28
+
+Perezapuskaem set':
+systemctl restart network
+
+1.8 Nastroyka iptables
+iptables -t nat -A POSTROUTING -o enp7s1 -j MASQUERADE
+Sokhranyaem i vklyuchaem:
+iptables-save > /etc/sysconfig/iptables
+systemctl enable iptables
+
+Chtoby navernyaka ponyat' chto iptables vklyuchen:
+systemctl status iptables
+
+Esli on ne zapushchen, poprobuyte:
+systemctl start iptables
+
+================================================================
+
+2. HQ-RTR
+
+2.1 Pereimenovanie mashiny i izmenenie chasovykh poyasov
+hostnamectl set-hostname hq-rtr.au-team.irpo; exec bash
+
+2.2 Nastroyka interfeysa enp7s1 (podklyuchenie k ISP)
+mkdir -p /etc/net/ifaces/enp7s1
+cd /etc/net/ifaces/enp7s1
+- Fayl ipv4address: 172.16.1.2/28
+- Fayl ipv4route: default via 172.16.1.1
+- Fayl resolv.conf: nameserver 8.8.8.8
+- Fayl options:
+ONBOOT=yes
+TYPE=eth
+DISABLED=no
+CONFIG_IPV4=yes
+BOOTPROTO=static
+SYSTEMD_BOOTPROTO=static
+SYSTEMD_CONTROLLED=no
+CONFIG_WIRELESS=no
+NM_CONTROLLED=yes
+
+2.3 Nastroyka enp7s2 (dlya VLAN)
+- Fayl ipv4route: default via 172.16.1.1/28
+- Fayl options:
+ONBOOT=yes
+TYPE=eth
+DISABLED=no
+CONFIG_IPV4=no
+Perezapuskaem set':
+systemctl restart network
+
+2.4 Ustanovka paketov
+apt-get update
+apt-get install iptables frr dnsmasq sudo -y
+Vklyuchaem forwarding (/etc/net/sysctl.conf):
+net.ipv4.ip_forward = 1
+Primenyaem:
+sysctl -p
+
+2.5 Nastroyka iptables (NAT)
+Nastraivaem NAT:
+iptables -t nat -A POSTROUTING -o enp7s1 -j MASQUERADE
+
+Sokhranyaem pravila:
+iptables-save > /etc/sysconfig/iptables
+systemctl enable iptables
+systemctl status iptables
+systemctl start iptables
+
+2.6 Nastroyka VLAN 100, 200, 999
+VLAN 100 (HQ-SRV):
+mkdir -p /etc/net/ifaces/vlan100
+cd /etc/net/ifaces/vlan100
+- Fayl ipv4address: 192.168.1.1/27
+- Fayl options:
+ONBOOT=yes
+TYPE=vlan
+VID=100
+DISABLED=no
+CONFIG_IPV4=yes
+BOOTPROTO=static
+HOST=enp7s2
+
+Kopiruem nastroyki:
+cd ..
+cp -rf vlan100 vlan200
+cp -rf vlan100 vlan999
+
+VLAN 200 (CLI-SRV):
+- ipv4address: 192.168.2.1/28
+- Fayl options:
+Menyaem VID=100 na VID=200
+
+VLAN 999:
+- ipv4address: 192.168.3.1/29
+- Fayl options:
+Menyaem VID=100 na VID=999
+
+Perezapuskaem set':
+systemctl restart network
+
+2.7 Nastroyka DHCP (dnsmasq) dlya VLAN200 / HQ-CLI
+Otkryvaem osnovnoy konfig:
+vim /etc/dnsmasq.conf
+V samyy konets fayla (Shift+g) dobav' eti 4 stroki:
+interface=vlan200
+dhcp-range=192.168.2.10,192.168.2.14,12h
+dhcp-option=3,192.168.2.1
+dhcp-option=6,192.168.1.2,8.8.8.8
+dhcp-option=15,au-team.irpo
+Sokhrani i primeni:
+systemctl restart dnsmasq
+systemctl enable dnsmasq
+systemctl status dnsmasq   # dolzhno byt' active (running)
+
+2.8 Nastroyka GRE
+mkdir -p /etc/net/ifaces/gre1
+cd /etc/net/ifaces/gre1
+- Fayl ipv4address: 10.10.10.1/30
+- Fayl ipv4route: 192.164.4.0/27 via 10.10.10.2
+- Fayl options:
+ONBOOT=yes
+TYPE=iptun
+TUNTYPE=gre
+TUNLOCAL=172.16.1.2
+TUNREMOTE=172.16.2.2
+DISABLED=no
+CONFIG_IPV4=yes
+BOOTPROTO=static
+HOST=enp7s1
+I chtoby primenit' GRE, perezapuskaem VM:
+reboot
+
+================================================================
+
+3. HQ-SRV
+
+3.1 Pereimenovanie mashiny
+hostnamectl set-hostname hq-srv.au-team.irpo; exec bash
+
+3.2 Nastroyka interfeysa enp7s1 (podklyuchenie k HQ-RTR)
+cd /etc/net/ifaces/enp7s1
+- Fayl ipv4address: 192.168.1.2/28
+- Fayl ipv4route: default via 192.168.1.1
+- Fayl resolv.conf: nameserver 8.8.8.8
+- Fayl options:
+ONBOOT=yes
+TYPE=eth
+DISABLED=no
+CONFIG_IPV4=yes
+BOOTPROTO=static
+SYSTEMD_BOOTPROTO=static
+SYSTEMD_CONTROLLED=no
+CONFIG_WIRELESS=no
+
+3.3 Perezapusk seti
+systemctl restart network
+
+================================================================
+
+4. HQ-CLI
+
+4.1 Pereimenovanie mashiny i izmenenie chasovykh poyasov
+hostnamectl set-hostname hq-cli.au-team.irpo; exec bash
+
+4.2 Otklyuchenie NetworkManager
+systemctl stop NetworkManager
+systemctl disable NetworkManager
+Prichina: NetworkManager ignoriruet DNS-optsii iz DHCP i ne zapisyvaet ikh v /etc/resolv.conf. Vmesto nego ispol'zuem etcnet.
+
+4.3 Nastroyka interfeysa (ens19 ili enp7s1) cherez etcnet
+mkdir -p /etc/net/ifaces/ens19
+cd /etc/net/ifaces/ens19
+Fayl options:
+ONBOOT=yes
+DISABLED=no
+BOOTPROTO=dhcp
+TYPE=eth
+NM_CONTROLLED=no
+
+4.4 Perezapusk seti i proverka
+systemctl restart network
+ip -c -br a           # dolzhen poluchit' adres iz pula 192.168.2.10-14
+cat /etc/resolv.conf  # dolzhen poyavit'sya nameserver 192.168.1.2
+ping ya.ru
+
+================================================================
+
+5. BR-RTR
+
+5.1 Pereimenovanie mashiny i izmenenie chasovykh poyasov
+hostnamectl set-hostname br-rtr.au-team.irpo; exec bash
+
+5.2 Nastroyka interfeysa enp7s1 (podklyuchenie k ISP)
+cd /etc/net/ifaces/enp7s1
+- Fayl ipv4address: 172.16.2.2/28
+- Fayl ipv4route: default via 172.16.2.1
+- Fayl resolv.conf: nameserver 8.8.8.8
+- Fayl options:
+ONBOOT=yes
+TYPE=eth
+DISABLED=no
+CONFIG_IPV4=yes
+BOOTPROTO=static
+SYSTEMD_BOOTPROTO=static
+SYSTEMD_CONTROLLED=no
+CONFIG_WIRELESS=no
+
+5.3 Nastroyka enp7s2 (dlya BR-SRV)
+Kopiruem nastroyki:
+cp /etc/net/ifaces/enp7s1 enp7s2/
+cd /etc/net/ifaces/enp7s2
+- Fayl ipv4address: 192.168.4.1/28
+- Fayl ipv4route: 192.168.4.0/28 via 192.168.4.2/28
+
+5.4 Obnovlenie i ustanovka iptables
+apt-get update
+apt-get install iptables sudo -y
+
+5.5 Vklyuchenie IP-forwarding
+Otredaktiruyte fayl /etc/net/sysctl.conf (menyaem 0 na 1):
+net.ipv4.ip_forward = 1
+Primenyaem:
+sysctl -p
+
+5.6 Nastroyka iptables
+iptables -t nat -A POSTROUTING -o enp7s1 -j MASQUERADE
+Sokhranyaem i vklyuchaem:
+iptables-save > /etc/sysconfig/iptables
+systemctl enable iptables
+systemctl start iptables
+
+Perezapuskaem set':
+systemctl restart network
+
+2.8 Nastroyka GRE1
+mkdir -p /etc/net/ifaces/gre1
+cd /etc/net/ifaces/gre1
+- Fayl ipv4address: 10.10.10.2/30
+- Fayl ipv4route:
+192.164.1.0/27 via 10.10.10.1
+192.164.2.0/26 via 10.10.10.1
+192.164.3.0/29 via 10.10.10.1
+
+- Fayl options:
+ONBOOT=yes
+TYPE=iptun
+TUNTYPE=gre
+TUNLOCAL=172.16.2.2
+TUNREMOTE=172.16.1.2
+DISABLED=no
+CONFIG_IPV4=yes
+BOOTPROTO=static
+HOST=enp7s1
+I chtoby primenit' GRE, perezapuskaem VM:
+reboot
+
+================================================================
+
+6. BR-SRV
+
+6.1 Pereimenovanie mashiny
+hostnamectl set-hostname br-srv.au-team.irpo; exec bash
+
+6.2 Nastroyka interfeysa enp7s1 (podklyuchenie k BR-RTR)
+cd /etc/net/ifaces/enp7s1
+- Fayl ipv4address: 192.168.4.2/28
+- Fayl ipv4route: default via 192.168.4.1
+- Fayl resolv.conf: nameserver 8.8.8.8
+- Fayl options:
+ONBOOT=yes
+TYPE=eth
+DISABLED=no
+CONFIG_IPV4=yes
+BOOTPROTO=static
+SYSTEMD_BOOTPROTO=static
+SYSTEMD_CONTROLLED=no
+CONFIG_WIRELESS=no
+
+Perezapuskaem set':
+systemctl restart network
+
+================================================================
+
+7. Lokal'nye uchyotnye zapisi
+
+7.1 Sozdanie sshuser na HQ-SRV i BR-SRV
+Vypolnit' na oboikh serverakh.
+Sozdayom pol'zovatelya s UID 1010:
+useradd -u 1010 sshuser
+passwd sshuser
+Parol': P@ssw0rd
+Dobavlyaem v gruppu wheel:
+usermod -aG wheel sshuser
+Razreshaem sudo bez parolya:
+visudo
+Nayti i raskommentirovat' stroku (ona gde-to v kontse fayla):
+# WHEEL  ALL=(ALL:ALL) NOPASSWD: ALL
+Ubrat' # v nachale stroki s pomoshch'yu Delete na etom znake.
+Proverka:
+su - sshuser
+id
+sudo whoami
+id dolzhen pokazat' uid=1010, sudo whoami vernut' root bez zaprosa parolya.
+
+7.2 Sozdanie net_admin na HQ-RTR i BR-RTR
+Vypolnit' na oboikh routerakh.
+useradd net_admin
+passwd net_admin
+usermod -aG wheel net_admin
+Parol': P@$$word
+Proverka:
+su - net_admin
+sudo whoami
+
+================================================================
+
+8. Bezopasnyy SSH-dostup
+Vypolnit' na HQ-SRV i BR-SRV.
+
+8.1 Redaktiruem konfig
+vim /etc/openssh/sshd_config
+Nayti i izmenit'/dobavit':
+Port 2024
+AllowUsers sshuser
+MaxAuthTries 2
+PasswordAuthentication yes
+Banner /etc/openssh/banner
+
+8.2 Sozdayom banner
+vim /etc/openssh/banner
+Soderzhimoe fayla:
+Authorized access only
+
+8.3 Perezapusk i proverka
+systemctl restart sshd
+Proverka s drugoy mashiny:
+ssh -p 2024 sshuser@192.168.1.2
+Dolzhen pokazat' banner Authorized access only.
+Proverka chto drugie pol'zovateli zablokirovany:
+ssh -p 2024 root@192.168.1.2
+Dolzhno vernut' Permission denied.
+
+================================================================
+
+9. DNS (BIND) na HQ-SRV
+
+9.1 Ustanovka
+apt-get install bind -y
+
+9.2 Nastroyka options.conf
+vim /var/lib/bind/etc/options.conf
+Vazhno: v fayle nayti stroku include "/etc/bind/resolvconf-options.conf"; i zakommentirovat' eyo (postavit' // v nachalo). Inache BIND ne zapustitsya s oshibkoy 'forwarders' redefined.
+
+Soderzhimoe fayla (nayti eti stroki v fayle i zamenit'/izmenit') options { ... }:
+options {
+    listen-on { 192.168.1.2; 127.0.0.1; };
+    forwarders { 8.8.8.8; };
+    allow-query { any; };
+    recursion yes;
+};
+
+9.3 Dobavlyaem zony v rfc1912.conf
+vim /var/lib/bind/etc/rfc1912.conf
+Dobavit' v konets fayla:
+zone "au-team.irpo" {
+    type master;
+    file "au-team.irpo";
+    allow-update { none; };
+};
+
+zone "1.168.192.in-addr.arpa" {
+    type master;
+    file "rev";
+    allow-update { none; };
+};
+
+9.4 Sozdayom fayl pryamoy zony
+cd /var/lib/bind/etc/zone
+cp localhost au-team.irpo
+vim au-team.irpo
+Vazhno - trebovaniya k sintaksisu faylov zon BIND:
+- $TTL 1D - mezhdu nimi dolzhen byt' probel, a ne tabulyatsiya
+- Kazhdaya zapis' (hq-rtr, moodle i t.d.) dolzhna nachinat'sya s pervoy kolonki, bez probelov i tabov v nachale stroki
+- Mezhdu kolonkami imya, IN, A, IP - tabulyatsii ili neskol'ko probelov
+- Tochka . v kontse hq-srv.au-team.irpo. obyazatel'na
+Soderzhimoe fayla:
+$TTL 1D
+@   IN SOA hq-srv.au-team.irpo. root. (1 1H 15M 1W 1H)
+    IN NS  hq-srv.au-team.irpo.
+
+hq-rtr  IN A 192.168.1.1
+hq-srv  IN A 192.168.1.2
+hq-cli  IN A 192.168.2.10
+br-rtr  IN A 172.16.2.2
+br-srv  IN A 192.168.4.2
+
+9.5 Sozdayom fayl obratnoy zony
+cp localhost rev
+vim rev
+Soderzhimoe:
+$TTL 1D
+@   IN SOA hq-srv.au-team.irpo. root. (1 1H 15M 1W 1H)
+    IN NS  hq-srv.au-team.irpo.
+
+1   IN PTR hq-rtr.au-team.irpo.
+2   IN PTR hq-srv.au-team.irpo.
+10  IN PTR hq-cli.au-team.irpo.
+
+9.6 Zapusk
+chgrp named /var/lib/bind/etc/zone/*
+chmod 644 /var/lib/bind/etc/zone/*
+named-checkconf (Ne obyazatel'no)
+named-checkconf -z (Ne obyazatel'no)
+
+systemctl enable bind
+systemctl restart bind
+systemctl status bind
+
+9.9 Proverka DNS
+S HQ-CLI:
+host hq-rtr.au-team.irpo
+host moodle.au-team.irpo
+nslookup 192.168.1.1
+ping moodle.au-team.irpo
+Vsyo dolzhno rezolvit'sya bez ukazaniya DNS-servera yavno.
+
+================================================================
+
+NE RABOTAET
+
+2. HQ
+
+2.1 Nastroyka GRE
+mkdir -p /etc/net/ifaces/gre1
+cd /etc/net/ifaces/gre1
+
+2.2 Nastroyka interfeysa enp7s1 (podklyuchenie k ISP)
+mkdir -p /etc/net/ifaces/enp7s1
+cd /etc/net/ifaces/enp7s1
+- Fayl ipv4address: 172.16.1.2/28
+- Fayl ipv4route: default via 172.16.1.1
+- Fayl resolv.conf: nameserver 8.8.8.8
+- Fayl options:
+ONBOOT=yes
+TYPE=eth
+DISABLED=no
+CONFIG_IPV4=yes
+BOOTPROTO=static
+SYSTEMD_BOOTPROTO=static
+SYSTEMD_CONTROLLED=no
+CONFIG_WIRELESS=no
+NM_CONTROLLED=yes
+
+OSPF - HQ
+cat > /etc/frr/frr.conf << 'EOF'
+frr version 9.0.2
+frr defaults traditional
+no ipv6 forwarding
+!
+interface gre1
+ ip ospf network point-to-point
+ ip ospf hello-interval 5
+ ip ospf dead-interval 20
+!
+router ospf
+ ospf router-id 1.1.1.1
+ network 10.0.0.0/30 area 0
+ network 192.168.1.0/27 area 0
+ network 192.168.2.0/28 area 0
+ network 192.168.3.0/29 area 0
+!
+EOF
+
+OSPF - BR
+cat > /etc/frr/frr.conf << 'EOF'
+frr version 9.0.2
+frr defaults traditional
+no ipv6 forwarding
+!
+interface gre1
+ ip ospf network point-to-point
+ ip ospf hello-interval 5
+ ip ospf dead-interval 20
+!
+router ospf
+ ospf router-id 2.2.2.2
+ network 10.0.0.0/30 area 0
+ network 192.168.4.0/27 area 0
+!
+EOF
