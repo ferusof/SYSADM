@@ -1,0 +1,360 @@
+Metodichka: Demo-ekzamen Alt Linux p10 ot Olezhi
+Modul 2 — Setevoe administrirovanie OS
+
+1. Samba DC na BR-SRV
+Chto eto: Samba — eto domennyy kontroller na Linux, analog Windows AD. On pozvolyaet sozdat domen, dobavlyat polzovateley i vvodit mashiny v domen.
+1.1 Ustanovka
+apt-get install task-samba-dc -y
+1.2 Sozdanie domena
+Komanda zapuskaet interaktivnyy master nastroyki domena:
+samba-tool domain provision --use-rfc2307 --interactive
+Otvechaem na voprosy strogo tak:
+Realm:                AU-TEAM.IRPO
+Domain:               AU-TEAM
+Server Role:          dc
+DNS backend:          SAMBA_INTERNAL
+DNS forwarder IP:     8.8.8.8
+Administrator password: P@ssw0rd
+1.3 Kopiruem konfig Kerberos
+Kerberos — protokol autentifikatsii, ispolzuetsya pri vhode v domen. Samba sozdayot ego konfig sam, nam nuzhno tolko skopirovat:
+cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
+1.4 Zapusk Samba
+systemctl enable --now samba
+Proverka — dolzhen pokazat informatsiyu o domene:
+samba-tool domain info 127.0.0.1
+
+1.5 Sozdanie gruppy hq
+Gruppa nuzhna chtoby potom razreshit eyo chlenam vhodit na HQ-CLI:
+samba-tool group add hq
+1.6 Sozdanie polzovateley
+Sozdayom kazhdogo polzovatelya vruchnuyu (imena user1hq...user5hq):
+samba-tool user create user1hq P@ssw0rd
+samba-tool user create user2hq P@ssw0rd
+samba-tool user create user3hq P@ssw0rd
+samba-tool user create user4hq P@ssw0rd
+samba-tool user create user5hq P@ssw0rd
+Dobavlyaem vseh v gruppu hq:
+samba-tool group addmembers hq user1hq
+samba-tool group addmembers hq user2hq
+samba-tool group addmembers hq user3hq
+samba-tool group addmembers hq user4hq
+samba-tool group addmembers hq user5hq
+Proverka:
+samba-tool group listmembers hq
+
+1.7 Import polzovateley iz fayla users.csv
+Fayl /opt/users.csv soderzhit polzovateley v formate username;password. Otkryvaem fayl chtoby posmotret strukturu:
+cat /opt/users.csv
+Sozdayom kazhdogo polzovatelya iz fayla vruchnuyu po analogii s razdelom 1.6.
+
+1.8 Ogranichennyy sudo dlya gruppy hq
+Po zadaniyu polzovateli gruppy hq mogut vypolnyat s sudo tolko tri komandy: cat, grep, id. Dlya etogo sozdayom otdelnyy fayl v sudoers.d:
+vim /etc/sudoers.d/hq
+Soderzhimoe fayla:
+%hq ALL=(ALL) /bin/cat, /bin/grep, /usr/bin/id
+Simvol % oznachaet chto eto gruppa, a ne polzovatel.
+%hq ALL=(ALL) /bin/cat, /bin/grep, /usr/bin/i
+Vystavit prava
+chmod 400 /etc/sudoers.d/hq
+
+1.9 Vvod HQ-CLI v domen
+Perehodim na mashinu HQ-CLI.
+Ustanavlivaem paket dlya raboty s AD cherez SSSD:
+apt-get install task-auth-ad-sssd -y
+Nastraivaem Kerberos — ukazyvaem gde nahoditsya nash domen:
+vim /etc/krb5.conf
+Soderzhimoe:
+[libdefaults]
+    default_realm = AU-TEAM.IRPO
+    dns_lookup_realm = false
+    dns_lookup_kdc = false
+
+[realms]
+AU-TEAM.IRPO = {
+    kdc = br-srv.au-team.irpo
+    kdc = 192.168.4.2
+    admin_server = br-srv.au-team.irpo
+    admin_server = 192.168.4.2
+}
+
+[domain_realm]
+.au-team.irpo = AU-TEAM.IRPO
+au-team.irpo = AU-TEAM.IRPO
+
+ 
+Vvodim mashinu v domen (potrebuet parol Administrator — P@ssw0rd):
+realm join AU-TEAM.IRPO -U administrator
+Razreshaem vhod na mashinu tolko polzovatelyam gruppy hq:
+realm permit -g hq
+Proverka — dolzhen pokazat UID i gruppy domennogo polzovatelya:
+id user1hq@au-team.irpo
+
+2. RAID5 + NFS na HQ-SRV
+Chto eto: RAID5 — eto obedinenie neskolkih diskov v odin massiv s zaschitoy ot poteri odnogo diska. NFS — setevaya faylovaya sistema, pozvolyaet montirovat papku s servera kak lokalnuyu.
+2.1 Smotrim diski
+Dolzhny byt tri svobodnyh diska (sdb, sdc, sdd) po 1 Gb:
+lsblk
+2.2 Ustanavlivaem mdadm i sozdayom massiv
+mdadm — utilita dlya upravleniya RAID v Linux. -l5 — uroven RAID (5), -n3 — kolichestvo diskov:
+apt-get install mdadm -y
+mdadm --create /dev/md0 -l5 -n3 /dev/sdb /dev/sdc /dev/sdd
+2.3 Formatiruem massiv v ext4
+mkfs.ext4 /dev/md0
+2.4 Sohranyaem konfig massiva
+Chtoby massiv sobiralsya avtomaticheski posle perezagruzki:
+mkdir /etc/mdadm
+echo "DEVICE partitions" > /etc/mdadm/mdadm.conf
+mdadm --detail --scan >> /etc/mdadm/mdadm.conf
+Proveryaem chto zapisalos:
+cat /etc/mdadm/mdadm.conf
+2.5 Avtomontirovanie massiva
+Sozdayom papku kuda budet montirovatsya massiv:
+mkdir /raid5
+Otkryvaem /etc/fstab — eto fayl avtomontirovaniya, vsyo chto zdes propisano montiruetsya pri zagruzke:
+vim /etc/fstab
+Dobavit stroku v konets:
+/dev/md0  /raid5  ext4  defaults  0  0
+Primenyaem montirovanie pryamo seychas bez perezagruzki:
+mount -av
+
+2.6 Nastroyka NFS servera na HQ-SRV
+Ustanavlivaem NFS server:
+apt-get install nfs-server nfs-utils -y
+Sozdayom papku obschego dostupa i vydayom prava:
+mkdir /raid5/nfs
+chmod 777 /raid5/nfs
+Nastraivaem dostup k papke — otkryvaem fayl eksportov:
+vim /etc/exports
+Dobavit stroku:
+/raid5/nfs  192.168.2.0/28(rw,no_root_squash,sync)
+Zdes 192.168.2.0/28 — set HQ-CLI, rw — chtenie i zapis, no_root_squash — root na kliente ne ogranichen, sync — sinhronnaya zapis.
+Zapuskaem NFS server:
+systemctl enable --now nfs-server
+Proverka — dolzhna pokazat eksportiruemye papki:
+showmount -e localhost
+
+2.7 Avtomontirovanie NFS na HQ-CLI
+Perehodim na mashinu HQ-CLI.
+Ustanavlivaem utility NFS klienta:
+apt-get install nfs-utils -y
+Sozdayom papku kuda budet montirovatsya setevaya papka:
+mkdir /mnt/nfs
+chmod 777 /mnt/nfs
+Otkryvaem /etc/fstab i dobavlyaem stroku v konets:
+vim /etc/fstab
+192.168.1.2:/raid5/nfs  /mnt/nfs  nfs  defaults  0  0
+Primenyaem:
+mount -av
+Proverka — dolzhna pokazat smontirovannuyu NFS papku:
+df -h | grep nfs
+
+3. Chrony — sinhronizatsiya vremeni
+Chto eto: Chrony — sluzhba sinhronizatsii vremeni po protokolu NTP. HQ-RTR budet serverom vremeni dlya vsey seti.
+3.1 Na HQ-RTR (nastraivaem server)
+Ustanavlivaem:
+apt-get install chrony -y
+Otkryvaem konfig:
+vim /etc/chrony.conf
+Zamenyaem vsyo soderzhimoe na:
+server 127.127.1.0 iburst
+local stratum 5
+allow all
+Zdes 127.127.1.0 — lokalnye chasy samogo routera, stratum 5 — uroven tochnosti (po zadaniyu), allow all — razreshaem klientam sinhronizirovatsya s nami.
+systemctl enable --now chronyd
+3.2 Na klientah: HQ-SRV, BR-SRV, HQ-CLI, BR-RTR
+Na kazhdoy mashine ustanavlivaem i nastraivaem:
+apt-get install chrony -y
+vim /etc/chrony.conf
+Dobavit stroku (ostalnoe ne trogat):
+server 192.168.1.1 iburst
+192.168.1.1 — eto adres HQ-RTR, nash server vremeni.
+systemctl restart chronyd
+Proverka — dolzhny videt HQ-RTR kak istochnik vremeni:
+chronyc sources
+
+4. Ansible na BR-SRV
+Chto eto: Ansible — instrument avtomatizatsii. Pozvolyaet upravlyat neskolkimi mashinami odnovremenno. Na ekzamene nuzhno chtoby vse mashiny otvechali pong na komandu ping.
+4.1 Ustanovka
+apt-get install ansible sshpass -y
+sshpass nuzhen chtoby ansible mog podklyuchatsya po SSH s parolem.
+4.2 Fayl inventarya /etc/ansible/hosts
+Inventar — eto spisok mashin kotorymi upravlyaet ansible:
+vim /etc/ansible/hosts
+Soderzhimoe:
+[all]
+hq-srv ansible_host=192.168.1.2 ansible_user=sshuser ansible_ssh_pass=P@ssw0rd ansible_port=2024
+hq-cli ansible_host=192.168.2.10 ansible_user=sshuser ansible_ssh_pass=P@ssw0rd ansible_port=2024
+hq-rtr ansible_host=192.168.1.1 ansible_user=net_admin ansible_ssh_pass=P@$$word
+br-rtr ansible_host=10.0.0.1 ansible_user=net_admin ansible_ssh_pass=P@$$word
+4.3 Konfig ansible /etc/ansible/ansible.cfg
+Konfig nuzhen chtoby ubrat lishnie preduprezhdeniya:
+vim /etc/ansible/ansible.cfg
+Soderzhimoe:
+[defaults]
+inventory = /etc/ansible/hosts
+host_key_checking = False
+interpreter_python = /usr/bin/python3
+host_key_checking = False — ne proveryat SSH klyuchi (inache budet zapros podtverzhdeniya pri pervom podklyuchenii).
+4.4 Proverka
+Vse mashiny dolzhny otvetit pong zelyonym tsvetom:
+ansible all -m ping
+
+5. Docker + MediaWiki na BR-SRV
+Chto eto: Docker pozvolyaet zapuskat prilozheniya v izolirovannyh konteynerah. MediaWiki — dvizhok Vikipedii. Po zadaniyu nuzhno zapustit MediaWiki s bazoy dannyh cherez Docker Compose.
+5.1 Ustanovka Docker
+apt-get install docker-engine docker-compose -y
+systemctl enable --now docker
+5.2 Sozdayom fayl /root/wiki.yml
+Docker Compose fayl opisyvaet kakie konteynery zapustit:
+vim /root/wiki.yml
+Soderzhimoe:
+services:
+  mariadb:
+    image: mariadb:latest
+    container_name: mariadb
+    restart: always
+    environment:
+      - MYSQL_ROOT_PASSWORD=toor
+      - MYSQL_DATABASE=mediawiki
+      - MYSQL_USER=wiki
+      - MYSQL_PASSWORD=WikiP@ssw0rd
+
+  wiki:
+    image: mediawiki:latest
+    container_name: wiki
+    ports:
+      - "8080:80"
+    depends_on:
+      - mariadb
+    # volumes:
+    #   - /root/mediawiki/LocalSettings.php:/var/www/html/LocalSettings.php
+Stroka s volumes zakommentirovana — ona nuzhna budet posle ustanovki MediaWiki.
+5.3 Zapusk konteynerov
+-f — ukazyvaem nash fayl, -d — zapustit v fone:
+docker compose -f /root/wiki.yml up -d
+Proverka chto konteynery zapustilis:
+docker ps
+5.4 Ustanovka MediaWiki cherez brauzer
+S mashiny HQ-CLI otkryvaem brauzer i perehodim:
+http://192.168.4.2:8080/mw-config/
+Prohodim master ustanovki, zapolnyaem parametry BD:
+DB host: mariadb
+DB name: mediawiki
+DB user: wiki
+DB pass: WikiP@ssw0rd
+Posle ustanovki brauzer skachaet fayl LocalSettings.php.
+5.5 Podklyuchaem LocalSettings.php
+Kopiruem skachannyy fayl na BR-SRV v papku /root/mediawiki/:
+mkdir /root/mediawiki
+Polozhit LocalSettings.php v etu papku.
+V fayle wiki.yml ubiraem simvol # pered strokoy volumes:
+vim /root/wiki.yml
+Dolzhno stat:
+    volumes:
+      - /root/mediawiki/LocalSettings.php:/var/www/html/LocalSettings.php
+Perezapuskaem konteynery:
+docker compose -f /root/wiki.yml stop
+docker compose -f /root/wiki.yml up -d
+
+6. Probros portov
+Chto eto: Port forwarding — perenapravlenie vhodyaschih soedineniy s vneshnego interfeysa routera na nuzhnuyu mashinu vnutri seti.
+6.1 HQ-RTR — probrasyvaem port 2024 na HQ-SRV
+Pakety prihodyaschie na vneshniy interfeys ens19 port 2024 perenapravlyaem na HQ-SRV 192.168.1.2 port 2024:
+iptables -t nat -A PREROUTING -i ens19 -p tcp --dport 2024 -j DNAT --to-destination 192.168.1.2:2024
+Sohranyaem chtoby pravilo ne propalo posle perezagruzki:
+iptables-save > /etc/sysconfig/iptables
+6.2 BR-RTR — probrasyvaem porty na BR-SRV
+Port 2024 → BR-SRV:
+iptables -t nat -A PREROUTING -i ens19 -p tcp --dport 2024 -j DNAT --to-destination 192.168.4.2:2024
+Port 80 → BR-SRV:8080 (dlya raboty MediaWiki snaruzhi):
+iptables -t nat -A PREROUTING -i ens19 -p tcp --dport 80 -j DNAT --to-destination 192.168.4.2:8080
+iptables-save > /etc/sysconfig/iptables
+
+7. Moodle na HQ-SRV
+Chto eto: Moodle — sistema distantsionnogo obucheniya. Rabotaet na Apache (veb-server) + MariaDB (baza dannyh).
+7.1 Ustanovka paketov
+Ustanavlivaem Apache, PHP i MariaDB so vsemi nuzhnymi modulyami:
+apt-get install apache2 php8.2 apache2-mods apache2-mod_php8.2 php8.2-libs mariadb-server php8.2-opcache php8.2-curl php8.2-gd php8.2-intl php8.2-mysqlnd-mysqli php8.2-xmlrpc php8.2-zip php8.2-soap php8.2-mbstring php8.2-xmlreader php8.2-fileinfo php8.2-sodium -y
+Zapuskaem oba servisa:
+systemctl enable --now httpd2 mariadb
+7.2 Sozdayom bazu dannyh
+Zahodim v konsol MariaDB:
+mariadb -u root
+Sozdayom bazu, polzovatelya i vydayom prava:
+create database moodle;
+create user moodle identified by 'P@ssw0rd';
+grant all privileges on moodle.* to moodle;
+flush privileges;
+exit;
+7.3 Skachivaem i razmeschaem Moodle
+Skachivaem arhiv Moodle:
+wget https://download.moodle.org/download.php/direct/stable405/moodle-latest-405.tgz
+Raspakovyvaem i peremeschaem v papku veb-servera:
+tar -xf moodle-latest-405.tgz
+mv moodle /var/www/html/
+Sozdayom papku dlya dannyh Moodle i vydayom prava:
+mkdir /var/www/moodledata
+chown -R apache2:apache2 /var/www/html /var/www/moodledata
+Udalyaem standartnuyu stranitsu Apache:
+rm /var/www/html/index.html
+7.4 Nastroyka Apache
+Otkryvaem konfig virtualnogo hosta i menyaem DocumentRoot:
+vim /etc/httpd2/conf/sites-available/default.conf
+Nayti stroku DocumentRoot i izmenit na:
+DocumentRoot /var/www/html/moodle
+7.5 Nastroyka PHP
+Uvelichivaem limit vhodnyh peremennyh (Moodle trebuet bolshe 1000):
+vim /etc/php/8.2/apache2-mod_php/php.ini
+Nayti stroku max_input_vars i izmenit:
+max_input_vars = 5000
+Perezapuskaem Apache:
+systemctl restart httpd2
+7.6 Ustanovka cherez brauzer
+S mashiny HQ-CLI otkryvaem brauzer: http://192.168.1.2/install.php
+Zapolnyaem parametry:
+DB type: MariaDB
+Host: localhost
+DB name: moodle
+User: moodle
+Pass: P@ssw0rd
+Esli ustanovschik prosit izmenit tip BD — otkryvaem /var/www/html/moodle/config.php i ispravlyaem stroku:
+$CFG->dbtype = 'mariadb';
+Parol dlya admin: P@ssw0rd
+V pole kratkoe nazvanie sayta vvodim tolko nomer rabochego mesta tsifroy.
+
+8. Nginx kak obratnyy proksi na HQ-RTR
+Chto eto: Obratnyy proksi prinimaet zaprosy po domennomu imeni i perenapravlyaet ih na nuzhnyy server. Klient obraschaetsya k HQ-RTR po imeni, a nginx reshaet kuda pereslat zapros.
+8.1 Ustanovka
+apt-get install nginx -y
+8.2 Konfig /etc/nginx/nginx.conf
+Otkryvaem konfig i dobavlyaem dva bloka server vnutr sektsii http {}:
+vim /etc/nginx/nginx.conf
+Dobavit vnutr http { }:
+server {
+    listen 80;
+    server_name moodle.au-team.irpo;
+    location / {
+        proxy_pass http://192.168.1.2:80;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+
+server {
+    listen 80;
+    server_name wiki.au-team.irpo;
+    location / {
+        proxy_pass http://192.168.4.2:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+proxy_pass — kuda perenapravlyat zapros, proxy_set_header — peredayom originalnye zagolovki na bekend.
+systemctl enable --now nginx
+Proverka s HQ-CLI:
+curl http://moodle.au-team.irpo
+curl http://wiki.au-team.irpo
+
+9. Yandeks Brauzer na HQ-CLI
+Ustanavlivaem korporativnuyu versiyu brauzera:
+apt-get install yandex-browser-stable -y
